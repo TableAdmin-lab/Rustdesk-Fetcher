@@ -1,11 +1,11 @@
-name: RustDesk APK Sync (with Dry Run)
+name: RustDesk APK Sync (Shared Drive Fix)
 on:
   schedule:
     - cron: '0 0 1,15 * *'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Check "True" to test without uploading to Google Drive'
+        description: 'Check "True" to test without uploading'
         required: true
         type: boolean
         default: false
@@ -42,7 +42,7 @@ jobs:
           is_dry_run = os.environ.get('DRY_RUN') == 'true'
           print(f"--- MODE: {'DRY RUN' if is_dry_run else 'PRODUCTION'} ---")
 
-          # 1. Get Latest RustDesk Info
+          # 1. Fetch Latest Release
           release_api = "https://api.github.com/repos/rustdesk/rustdesk/releases/latest"
           res = requests.get(release_api).json()
           tag = res['tag_name']
@@ -54,43 +54,64 @@ jobs:
           dl_url = assets[0]['browser_download_url']
           actual_filename = assets[0]['name']
 
-          # 2. Download File (Done in both modes to test the link)
+          # 2. Download Locally
           print(f"Downloading {actual_filename}...")
           r = requests.get(dl_url, stream=True)
           with open("rustdesk_universal.apk", 'wb') as f:
               for chunk in r.iter_content(chunk_size=8192):
                   f.write(chunk)
-          print("Download complete.")
-
+          
           if is_dry_run:
-              print("Dry Run: Skipping Google Drive authentication and file moves.")
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  f.write(f"new_update=true\ntag={tag} (DRY RUN)\n")
-              exit(0)
+              print("Dry Run complete."); exit(0)
 
-          # 3. Auth with Google
+          # 3. Google Drive Auth
           creds_dict = json.loads(os.environ['GDRIVE_CREDENTIALS'])
           creds = service_account.Credentials.from_service_account_info(creds_dict)
           drive = build('drive', 'v3', credentials=creds)
 
-          # 4. Check for existing file & Move to Legacy
+          # 4. Check & Move (Shared Drive Compatible)
           query = f"'{os.environ['LATEST_FOLDER']}' in parents and trashed = false"
-          results = drive.files().list(q=query, fields="files(id, name)").execute()
+          results = drive.files().list(
+              q=query, 
+              fields="files(id, name)",
+              supportsAllDrives=True, 
+              includeItemsFromAllDrives=True
+          ).execute()
           existing_files = results.get('files', [])
 
+          # Skip if version already matches
           if any(actual_filename == f['name'] for f in existing_files):
-              print("Version already exists. Skipping upload."); exit(0)
+              print("Version match found. No upload needed."); exit(0)
 
+          # Move current files to Legacy
           for f in existing_files:
-              drive.files().update(fileId=f['id'], addParents=os.environ['LEGACY_FOLDER'], removeParents=os.environ['LATEST_FOLDER']).execute()
-              print(f"Archived {f['name']}")
+              drive.files().update(
+                  fileId=f['id'], 
+                  addParents=os.environ['LEGACY_FOLDER'], 
+                  removeParents=os.environ['LATEST_FOLDER'],
+                  supportsAllDrives=True
+              ).execute()
+              print(f"Moved {f['name']} to Legacy folder.")
 
-          # 5. Upload to Google Drive
+          # 5. Upload to Shared Drive
+          print("Starting upload to Shared Drive...")
           file_metadata = {'name': actual_filename, 'parents': [os.environ['LATEST_FOLDER']]}
           media = MediaFileUpload('rustdesk_universal.apk', mimetype='application/vnd.android.package-archive', resumable=True)
-          drive.files().create(body=file_metadata, media_body=media, fields='id').execute()
           
-          print(f"Uploaded {actual_filename}")
+          request = drive.files().create(
+              body=file_metadata, 
+              media_body=media, 
+              fields='id',
+              supportsAllDrives=True
+          )
+          
+          response = None
+          while response is None:
+              status, response = request.next_chunk()
+              if status:
+                  print(f"Uploaded {int(status.progress() * 100)}%")
+          
+          print(f"Final Success: {actual_filename} uploaded.")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"new_update=true\ntag={tag}\n")
           EOF
@@ -101,7 +122,7 @@ jobs:
         with:
           payload: |
             {
-              "text": "🛠 *Dry Run Successful*\nDetected RustDesk `${{ steps.process.outputs.tag }}`\nFile downloaded locally on runner. Google Drive was *not* touched."
+              "text": "✅ *RustDesk Business Update Success*\nVersion: `${{ steps.process.outputs.tag }}`\nStatus: Uploaded to Shared Drive."
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
