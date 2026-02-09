@@ -1,4 +1,4 @@
-name: RustDesk Master Sync
+name: RustDesk Master Sync 
 on:
   schedule:
     - cron: '0 0 1,15 * *' # Bi-monthly at midnight
@@ -41,7 +41,7 @@ jobs:
 
           is_dry_run = os.environ.get('DRY_RUN') == 'true'
           
-          # 1. Fetch Latest Release
+          # 1. Fetch Latest Release from GitHub
           res = requests.get("https://api.github.com/repos/rustdesk/rustdesk/releases/latest").json()
           tag = res['tag_name']
           assets = [a for a in res['assets'] if "universal-signed.apk" in a['name']]
@@ -52,37 +52,56 @@ jobs:
           dl_url = assets[0]['browser_download_url']
           actual_filename = assets[0]['name']
 
-          # 2. Download
+          # 2. Google Drive Auth
+          creds = service_account.Credentials.from_service_account_info(json.loads(os.environ['GDRIVE_CREDENTIALS']))
+          drive = build('drive', 'v3', credentials=creds)
+
+          # 3. Smart Version Check (Checks folder before downloading 80MB)
+          query = f"'{os.environ['LATEST_FOLDER']}' in parents and trashed = false"
+          results = drive.files().list(
+              q=query, 
+              fields="files(id, name)", 
+              supportsAllDrives=True, 
+              includeItemsFromAllDrives=True
+          ).execute()
+          existing_files = results.get('files', [])
+
+          print(f"Files found in 'Latest' folder: {[f['name'] for f in existing_files]}")
+
+          # Check if the tag (e.g. '1.4.5') exists in any filename in the folder
+          version_already_exists = any(tag in f['name'] for f in existing_files)
+
+          if version_already_exists:
+              print(f"Version {tag} already present in Drive. Skipping.")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write("new_update=false\n")
+              exit(0)
+
+          # 4. Download (Only happens if version is actually new)
+          print(f"New version {tag} detected. Downloading...")
           r = requests.get(dl_url, stream=True)
           with open("rustdesk_universal.apk", 'wb') as f:
               for chunk in r.iter_content(chunk_size=8192):
                   f.write(chunk)
           
           if is_dry_run:
+              print("DRY RUN: Version check passed, file downloaded, but no GDrive changes made.")
               with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
                   f.write(f"new_update=true\ntag={tag}-DRYRUN\n")
               exit(0)
 
-          # 3. Google Drive Auth
-          creds = service_account.Credentials.from_service_account_info(json.loads(os.environ['GDRIVE_CREDENTIALS']))
-          drive = build('drive', 'v3', credentials=creds)
-
-          # 4. Check Shared Drive
-          query = f"'{os.environ['LATEST_FOLDER']}' in parents and trashed = false"
-          results = drive.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
-          existing_files = results.get('files', [])
-
-          # CASE: NO UPDATE
-          if any(actual_filename == f['name'] for f in existing_files):
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  f.write("new_update=false\n")
-              exit(0)
-
-          # CASE: UPDATE FOUND - Move old to Legacy
+          # 5. Archive Old Files
           for f in existing_files:
-              drive.files().update(fileId=f['id'], addParents=os.environ['LEGACY_FOLDER'], removeParents=os.environ['LATEST_FOLDER'], supportsAllDrives=True).execute()
+              print(f"Archiving {f['name']} to Legacy folder...")
+              drive.files().update(
+                  fileId=f['id'], 
+                  addParents=os.environ['LEGACY_FOLDER'], 
+                  removeParents=os.environ['LATEST_FOLDER'], 
+                  supportsAllDrives=True
+              ).execute()
 
-          # 5. Upload New
+          # 6. Upload New Version
+          print(f"Uploading {actual_filename} to Shared Drive...")
           file_metadata = {'name': actual_filename, 'parents': [os.environ['LATEST_FOLDER']]}
           media = MediaFileUpload('rustdesk_universal.apk', mimetype='application/vnd.android.package-archive', resumable=True)
           drive.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
@@ -110,7 +129,7 @@ jobs:
         with:
           payload: |
             {
-              "text": "🚀 *New RustDesk APK Uploaded!*\n*Version:* `${{ steps.process.outputs.tag }}`\n*Status:* Archived old version, uploaded new Universal APK to Shared Drive.\n\n📂 <https://drive.google.com/drive/u/0/folders/${{ secrets.LATEST_FOLDER_ID }}|Open Latest Folder>\n\nCC: <@UK9CP7SGN> <@U07FVM1LQU8> <@U087XPGRE9Z>  "
+              "text": "🚀 *New RustDesk APK Uploaded!*\n*Version:* `${{ steps.process.outputs.tag }}`\n*Status:* Archived old version, uploaded new Universal APK to Shared Drive.\n\n📂 <https://drive.google.com/drive/u/0/folders/${{ secrets.LATEST_FOLDER_ID }}|Open Latest Folder>\n\nCC: <@UK9CP7SGN> <@U07FVM1LQU8> <@U087XPGRE9Z>"
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
