@@ -122,7 +122,7 @@ jobs:
         with:
           payload: |
             {
-              "text": "✅ *RustDesk Business Update Success*\nVersion: `${{ steps.process.outputs.tag }}`\nStatus: Uploaded to Shared Drive."
+              "text": "✅ *RustDesk Updated*\nVersion: `${{ steps.process.outputs.tag }}`\nStatus: Uploaded to Shared Drive.\n\n📂 *Access Files:* <https://drive.google.com/drive/u/0/folders/${{ secrets.LATEST_FOLDER_ID }}|Open Latest Folder>\n\nCC: <@U07FVM1LQU8> <!here>"
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
