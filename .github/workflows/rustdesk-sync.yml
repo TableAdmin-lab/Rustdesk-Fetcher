@@ -1,0 +1,40 @@
+name: Sync RustDesk Update
+on:
+  schedule:
+    - cron: '0 0 1,15 * *' # Runs at midnight on the 1st and 15th
+  workflow_dispatch:      # Allows manual trigger for testing
+
+jobs:
+  check-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get Latest RustDesk Version
+        id: rustdesk
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | jq -r .tag_name)
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          # Logic: Find the Windows .exe download link
+          DL_URL=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | jq -r '.assets[] | select(.name | contains("x86_64.exe")) | .browser_download_url')
+          echo "url=$DL_URL" >> $GITHUB_OUTPUT
+
+      - name: Download File
+        run: curl -L -o rustdesk-latest.exe "${{ steps.rustdesk.outputs.url }}"
+
+      - name: Upload to Google Drive
+        uses: adityak74/google-drive-upload-git-action@main
+        with:
+          credentials: ${{ secrets.GDRIVE_CREDENTIALS_DATA }}
+          filename: rustdesk-latest.exe
+          folderId: ${{ secrets.GDRIVE_FOLDER_ID }}
+          overwrite: "true"
+
+      - name: Notify Slack
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "🚀 New RustDesk version (${{ steps.rustdesk.outputs.tag }}) uploaded to Google Drive successfully!"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
