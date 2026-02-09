@@ -1,4 +1,4 @@
-name: RustDesk APK Sync (Shared Drive Fix)
+name: RustDesk APK Sync
 on:
   schedule:
     - cron: '0 0 1,15 * *'
