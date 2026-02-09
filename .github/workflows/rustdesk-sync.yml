@@ -28,7 +28,7 @@ jobs:
       - name: Run Sync Logic
         id: process
         env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS_DATA }}
           LATEST_FOLDER: ${{ secrets.LATEST_FOLDER_ID }}
           LEGACY_FOLDER: ${{ secrets.LEGACY_FOLDER_ID }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
