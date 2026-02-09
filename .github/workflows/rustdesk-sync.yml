@@ -1,40 +1,107 @@
-name: Sync RustDesk Update
+name: RustDesk APK Sync (with Dry Run)
 on:
   schedule:
-    - cron: '0 0 1,15 * *' # Runs at midnight on the 1st and 15th
-  workflow_dispatch:      # Allows manual trigger for testing
+    - cron: '0 0 1,15 * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Check "True" to test without uploading to Google Drive'
+        required: true
+        type: boolean
+        default: false
 
 jobs:
-  check-and-upload:
+  sync-rustdesk:
     runs-on: ubuntu-latest
     steps:
-      - name: Get Latest RustDesk Version
-        id: rustdesk
-        run: |
-          LATEST_TAG=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | jq -r .tag_name)
-          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-          # Logic: Find the Windows .exe download link
-          DL_URL=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | jq -r '.assets[] | select(.name | contains("x86_64.exe")) | .browser_download_url')
-          echo "url=$DL_URL" >> $GITHUB_OUTPUT
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Download File
-        run: curl -L -o rustdesk-latest.exe "${{ steps.rustdesk.outputs.url }}"
-
-      - name: Upload to Google Drive
-        uses: adityak74/google-drive-upload-git-action@main
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          credentials: ${{ secrets.GDRIVE_CREDENTIALS_DATA }}
-          filename: rustdesk-latest.exe
-          folderId: ${{ secrets.GDRIVE_FOLDER_ID }}
-          overwrite: "true"
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: pip install google-api-python-client google-auth requests
+
+      - name: Run Sync Logic
+        id: process
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          LATEST_FOLDER: ${{ secrets.LATEST_FOLDER_ID }}
+          LEGACY_FOLDER: ${{ secrets.LEGACY_FOLDER_ID }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          python - <<EOF
+          import os, json, requests
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          is_dry_run = os.environ.get('DRY_RUN') == 'true'
+          print(f"--- MODE: {'DRY RUN' if is_dry_run else 'PRODUCTION'} ---")
+
+          # 1. Get Latest RustDesk Info
+          release_api = "https://api.github.com/repos/rustdesk/rustdesk/releases/latest"
+          res = requests.get(release_api).json()
+          tag = res['tag_name']
+          assets = [a for a in res['assets'] if "universal-signed.apk" in a['name']]
+          
+          if not assets:
+              print("Universal APK not found."); exit(1)
+              
+          dl_url = assets[0]['browser_download_url']
+          actual_filename = assets[0]['name']
+
+          # 2. Download File (Done in both modes to test the link)
+          print(f"Downloading {actual_filename}...")
+          r = requests.get(dl_url, stream=True)
+          with open("rustdesk_universal.apk", 'wb') as f:
+              for chunk in r.iter_content(chunk_size=8192):
+                  f.write(chunk)
+          print("Download complete.")
+
+          if is_dry_run:
+              print("Dry Run: Skipping Google Drive authentication and file moves.")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"new_update=true\ntag={tag} (DRY RUN)\n")
+              exit(0)
+
+          # 3. Auth with Google
+          creds_dict = json.loads(os.environ['GDRIVE_CREDENTIALS'])
+          creds = service_account.Credentials.from_service_account_info(creds_dict)
+          drive = build('drive', 'v3', credentials=creds)
+
+          # 4. Check for existing file & Move to Legacy
+          query = f"'{os.environ['LATEST_FOLDER']}' in parents and trashed = false"
+          results = drive.files().list(q=query, fields="files(id, name)").execute()
+          existing_files = results.get('files', [])
+
+          if any(actual_filename == f['name'] for f in existing_files):
+              print("Version already exists. Skipping upload."); exit(0)
+
+          for f in existing_files:
+              drive.files().update(fileId=f['id'], addParents=os.environ['LEGACY_FOLDER'], removeParents=os.environ['LATEST_FOLDER']).execute()
+              print(f"Archived {f['name']}")
+
+          # 5. Upload to Google Drive
+          file_metadata = {'name': actual_filename, 'parents': [os.environ['LATEST_FOLDER']]}
+          media = MediaFileUpload('rustdesk_universal.apk', mimetype='application/vnd.android.package-archive', resumable=True)
+          drive.files().create(body=file_metadata, media_body=media, fields='id').execute()
+          
+          print(f"Uploaded {actual_filename}")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"new_update=true\ntag={tag}\n")
+          EOF
 
       - name: Notify Slack
-        if: success()
+        if: steps.process.outputs.new_update == 'true'
         uses: slackapi/slack-github-action@v1.24.0
         with:
           payload: |
             {
-              "text": "🚀 New RustDesk version (${{ steps.rustdesk.outputs.tag }}) uploaded to Google Drive successfully!"
+              "text": "🛠 *Dry Run Successful*\nDetected RustDesk `${{ steps.process.outputs.tag }}`\nFile downloaded locally on runner. Google Drive was *not* touched."
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
